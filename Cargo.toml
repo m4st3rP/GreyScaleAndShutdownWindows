@@ -1,0 +1,24 @@
+[package]
+name = "grayscale-timer"
+version = "0.2.0"
+edition = "2021"
+description = "System-tray greyscale & shutdown scheduler for Windows 11"
+
+[dependencies]
+chrono   = "0.4"
+winreg   = "0.52"
+serde    = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
