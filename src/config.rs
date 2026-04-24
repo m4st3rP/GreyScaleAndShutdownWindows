@@ -74,8 +74,8 @@ impl Default for Config {
 impl Config {
     /// Full path to the config file.
     pub fn config_path() -> PathBuf {
-        let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-        Path::new(&appdata)
+        let programdata = std::env::var("PROGRAMDATA").unwrap_or_else(|_| "C:\\ProgramData".to_string());
+        Path::new(&programdata)
             .join("grayscale-timer")
             .join("config.json")
     }
