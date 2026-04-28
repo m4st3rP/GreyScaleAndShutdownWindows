@@ -35,10 +35,6 @@ pub struct Config {
     /// Whether the shutdown timer is active.
     pub shutdown_enabled: bool,
 
-    /// If true, activate the greyscale filter immediately when the programme
-    /// starts (handy when placed in the Windows Start-up folder).
-    pub activate_on_start: bool,
-
     /// Balloon-tip warnings to show before the shutdown.
     /// Each entry fires once per day, independently.
     pub notifications: Vec<Notification>,
@@ -52,7 +48,6 @@ impl Default for Config {
             grayscale_enabled: true,
             shutdown_time:     "23:00".to_string(),
             shutdown_enabled:  false,
-            activate_on_start: false,
             notifications: vec![
                 Notification {
                     minutes_before: 30,

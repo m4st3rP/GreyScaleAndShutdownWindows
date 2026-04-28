@@ -368,20 +368,47 @@ fn main() {
 
     // ── Load config, initialise global state ──────────────────────────────
     let cfg = Config::load();
-    let activate_now = cfg.activate_on_start;
+    let mut fired_grayscale = None;
+    let mut fired_grayscale_off = None;
+
+    // ── Initial grayscale check ───────────────────────────────────────────
+    if cfg.grayscale_enabled {
+        let now = Local::now();
+        let now_t = now.time();
+        if let (Ok(start), Ok(end)) = (
+            NaiveTime::parse_from_str(&cfg.grayscale_time, "%H:%M"),
+            NaiveTime::parse_from_str(&cfg.grayscale_disable_time, "%H:%M"),
+        ) {
+            if start != end {
+                let is_on = if start < end {
+                    now_t >= start && now_t < end
+                } else {
+                    now_t >= start || now_t < end
+                };
+                grayscale::set_grayscale(is_on);
+
+                // If we are exactly at one of the trigger minutes, mark it as fired
+                // so the scheduler doesn't show a balloon notification for the same event.
+                let today = now.date_naive();
+                let hm = now.format("%H:%M").to_string();
+                if hm == cfg.grayscale_time {
+                    fired_grayscale = Some(today);
+                }
+                if hm == cfg.grayscale_disable_time {
+                    fired_grayscale_off = Some(today);
+                }
+            }
+        }
+    }
 
     APP.set(Arc::new(Mutex::new(State {
         config:               cfg,
-        fired_grayscale:      None,
-        fired_grayscale_off:  None,
+        fired_grayscale,
+        fired_grayscale_off,
         fired_shutdown:       None,
         fired_notifs:         HashSet::new(),
         notif_msg:            String::new(),
     }))).ok();
-
-    if activate_now {
-        grayscale::set_grayscale(true);
-    }
 
     unsafe {
         // ── Register window class ──────────────────────────────────────────
