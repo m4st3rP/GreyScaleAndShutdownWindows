@@ -29,7 +29,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{Local, NaiveDate, NaiveTime};
+use chrono::{Local, NaiveDate, NaiveDateTime, NaiveTime};
 use windows::{
     core::PCWSTR,
     Win32::{
@@ -66,6 +66,7 @@ const WM_DO_SHUTDOWN:      u32 = WM_APP + 4;
 const WM_DO_NOTIFY:        u32 = WM_APP + 5;
 
 // ── Context-menu command IDs ──────────────────────────────────────────────────
+const IDM_SNOOZE:   usize = 100;
 const IDM_GRAY_ON:  usize = 101;
 const IDM_GRAY_OFF: usize = 102;
 const IDM_EDIT:     usize = 103;
@@ -80,6 +81,8 @@ struct State {
     fired_grayscale:      Option<NaiveDate>,
     fired_grayscale_off:  Option<NaiveDate>,
     fired_shutdown:       Option<NaiveDate>,
+    snoozed_today:        Option<NaiveDate>,
+    snooze_at:            Option<NaiveDateTime>,
     /// Keys are `"YYYY-MM-DD-<minutes_before>"` to fire each notification once.
     fired_notifs:    HashSet<String>,
     /// Message to show in the next WM_DO_NOTIFY balloon.
@@ -146,8 +149,38 @@ unsafe fn balloon(hwnd: HWND, title: &str, body: &str) {
 }
 
 /// Show the right-click context menu at the current cursor position.
+/// Returns the (date, original_time) of the shutdown that is currently relevant
+/// for snoozing (within the notification window or just fired).
+fn get_relevant_shutdown() -> Option<(NaiveDate, NaiveTime)> {
+    let state = app().lock().unwrap();
+    let cfg = &state.config;
+    if !cfg.shutdown_enabled {
+        return None;
+    }
+
+    let now = Local::now();
+    let sd_time = NaiveTime::parse_from_str(&cfg.shutdown_time, "%H:%M").ok()?;
+
+    // Check if we are within the snooze window before the scheduled time.
+    // We consider yesterday, today, and tomorrow in case the shutdown is near midnight.
+    let today = now.date_naive();
+    for offset in [-1, 0, 1] {
+        let date = today + chrono::Duration::days(offset);
+        let dt = date.and_time(sd_time);
+        let diff = dt.signed_duration_since(now.naive_local());
+
+        // If we're within the snooze window before shutdown, OR
+        // we're within 60 seconds AFTER the scheduled time (the grace period).
+        if diff.num_seconds() >= -60 && diff.num_minutes() <= cfg.snooze_available_minutes_before as i64 {
+             return Some((date, sd_time));
+        }
+    }
+    None
+}
+
 unsafe fn show_menu(hwnd: HWND) {
     // Keep the Vec<u16> alive until TrackPopupMenu returns (it blocks).
+    let s_snooze = wstr("Snooze Shutdown (15 mins)");
     let s_on    = wstr("Enable Greyscale Now");
     let s_off   = wstr("Disable Greyscale");
     let s_edit  = wstr("Edit Config in Notepad   (or double-click icon)");
@@ -158,6 +191,18 @@ unsafe fn show_menu(hwnd: HWND) {
         Ok(m) => m,
         Err(_) => return,
     };
+
+    let can_snooze = if let Some((date, _)) = get_relevant_shutdown() {
+        let state = app().lock().unwrap();
+        state.snoozed_today != Some(date)
+    } else {
+        false
+    };
+
+    if can_snooze {
+        let _ = AppendMenuW(hmenu, MF_STRING, IDM_SNOOZE, PCWSTR(s_snooze.as_ptr()));
+        let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+    }
 
     let _ = AppendMenuW(hmenu, MF_STRING,    IDM_GRAY_ON,  PCWSTR(s_on.as_ptr()));
     let _ = AppendMenuW(hmenu, MF_STRING,    IDM_GRAY_OFF, PCWSTR(s_off.as_ptr()));
@@ -218,6 +263,20 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRE
 
             WM_COMMAND => {
                 match (wp.0 & 0xFFFF) as usize {
+                    IDM_SNOOZE => {
+                        if let Some((date, time)) = get_relevant_shutdown() {
+                            let mut state = app().lock().unwrap();
+                            state.snoozed_today = Some(date);
+                            state.snooze_at = Some(date.and_time(time) + chrono::Duration::minutes(15));
+                            // Mark original shutdown as fired so it doesn't trigger if snoozed early.
+                            state.fired_shutdown = Some(date);
+
+                            // Cancel any pending OS shutdown
+                            let _ = Command::new("shutdown").arg("/a").spawn();
+
+                            balloon(hwnd, "Greyscale Timer", "Shutdown snoozed for 15 minutes.");
+                        }
+                    }
                     IDM_GRAY_ON  => grayscale::set_grayscale(true),
                     IDM_GRAY_OFF => grayscale::set_grayscale(false),
                     IDM_EDIT     => open_config(),
@@ -304,6 +363,27 @@ fn start_scheduler(hwnd: HWND) {
 
             // ── Shutdown notifications & shutdown ──────────────────────────
             if cfg.shutdown_enabled {
+                // Check for snoozed shutdown
+                let snooze_trigger = {
+                    let mut state = app().lock().unwrap();
+                    if let Some(snooze_dt) = state.snooze_at {
+                        if now.naive_local() >= snooze_dt {
+                            state.snooze_at = None;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                };
+
+                if snooze_trigger {
+                    unsafe {
+                        let _ = PostMessageW(hwnd, WM_DO_SHUTDOWN, WPARAM(0), LPARAM(0));
+                    }
+                }
+
                 if let Ok(sd_t) = NaiveTime::parse_from_str(&cfg.shutdown_time, "%H:%M") {
 
                     // Pre-shutdown balloon notifications
@@ -375,6 +455,8 @@ fn main() {
         fired_grayscale:      None,
         fired_grayscale_off:  None,
         fired_shutdown:       None,
+        snoozed_today:        None,
+        snooze_at:            None,
         fired_notifs:         HashSet::new(),
         notif_msg:            String::new(),
     }))).ok();
