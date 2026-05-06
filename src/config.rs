@@ -42,6 +42,9 @@ pub struct Config {
     /// Balloon-tip warnings to show before the shutdown.
     /// Each entry fires once per day, independently.
     pub notifications: Vec<Notification>,
+
+    /// How many minutes before the shutdown the snooze button becomes available.
+    pub snooze_available_minutes_before: u32,
 }
 
 impl Default for Config {
@@ -53,6 +56,7 @@ impl Default for Config {
             shutdown_time:     "23:00".to_string(),
             shutdown_enabled:  false,
             activate_on_start: false,
+            snooze_available_minutes_before: 30,
             notifications: vec![
                 Notification {
                     minutes_before: 30,
