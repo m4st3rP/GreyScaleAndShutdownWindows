@@ -46,13 +46,13 @@ pub fn set_grayscale(enable: bool) {
             // is processed.
             thread::sleep(Duration::from_millis(100));
 
-            unsafe { simulate_win_ctrl_c() };
+            simulate_win_ctrl_c();
         }
     }
 }
 
 /// Synthesise a Win + Ctrl + C key chord via `SendInput`.
-unsafe fn simulate_win_ctrl_c() {
+fn simulate_win_ctrl_c() {
     let inputs = [
         make_key(VK_LWIN,    false),
         make_key(VK_CONTROL, false),
@@ -61,10 +61,12 @@ unsafe fn simulate_win_ctrl_c() {
         make_key(VK_CONTROL, true),
         make_key(VK_LWIN,    true),
     ];
-    SendInput(&inputs, size_of::<INPUT>() as i32);
+    unsafe {
+        SendInput(&inputs, size_of::<INPUT>() as i32);
+    }
 }
 
-unsafe fn make_key(vk: VIRTUAL_KEY, key_up: bool) -> INPUT {
+fn make_key(vk: VIRTUAL_KEY, key_up: bool) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {

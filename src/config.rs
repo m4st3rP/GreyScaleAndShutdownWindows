@@ -35,9 +35,9 @@ pub struct Config {
     /// Whether the shutdown timer is active.
     pub shutdown_enabled: bool,
 
-    /// If true, activate the greyscale filter immediately when the programme
-    /// starts (handy when placed in the Windows Start-up folder).
-    pub activate_on_start: bool,
+    /// If true, the config file is overwritten on load to remove unknown fields
+    /// and ensure all default fields are present.
+    pub cleanup_config: bool,
 
     /// Balloon-tip warnings to show before the shutdown.
     /// Each entry fires once per day, independently.
@@ -55,7 +55,7 @@ impl Default for Config {
             grayscale_enabled: true,
             shutdown_time:     "23:00".to_string(),
             shutdown_enabled:  false,
-            activate_on_start: false,
+            cleanup_config:    true,
             snooze_available_minutes_before: 30,
             notifications: vec![
                 Notification {
@@ -90,6 +90,14 @@ impl Config {
         if path.exists() {
             if let Ok(contents) = std::fs::read_to_string(&path) {
                 if let Ok(cfg) = serde_json::from_str::<Config>(&contents) {
+                    // If cleanup_config is on, or if we want to ensure all fields are
+                    // present in the JSON, we re-save.
+                    // To strictly detect "missing fields", we'd need to compare
+                    // JSON keys, but always re-saving if cleanup_config is true
+                    // achieves the goal of updating the file to the current schema.
+                    if cfg.cleanup_config {
+                        cfg.save();
+                    }
                     return cfg;
                 }
             }
