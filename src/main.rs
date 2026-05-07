@@ -105,6 +105,15 @@ fn wstr(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Returns true if `now` is between `start` and `end`, handling midnight wrap-around.
+fn is_time_in_range(now: NaiveTime, start: NaiveTime, end: NaiveTime) -> bool {
+    if start < end {
+        now >= start && now < end
+    } else {
+        now >= start || now < end
+    }
+}
+
 fn copy_wstr(dst: &mut [u16], src: &str) {
     let v: Vec<u16> = src.encode_utf16().collect();
     let n = v.len().min(dst.len() - 1);
@@ -115,37 +124,43 @@ fn copy_wstr(dst: &mut [u16], src: &str) {
 // ── Tray-icon helpers ─────────────────────────────────────────────────────────
 
 /// Zero-initialised NOTIFYICONDATAW with the mandatory fields set.
-unsafe fn base_nid(hwnd: HWND) -> NOTIFYICONDATAW {
-    let mut nid: NOTIFYICONDATAW = mem::zeroed();
+fn base_nid(hwnd: HWND) -> NOTIFYICONDATAW {
+    let mut nid: NOTIFYICONDATAW = unsafe { mem::zeroed() };
     nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
     nid.hWnd   = hwnd;
     nid.uID    = TRAY_UID;
     nid
 }
 
-unsafe fn tray_add(hwnd: HWND) {
-    let hicon = LoadIconW(HINSTANCE::default(), IDI_APPLICATION).unwrap_or_default();
+fn tray_add(hwnd: HWND) {
+    let hicon = unsafe { LoadIconW(HINSTANCE::default(), IDI_APPLICATION).unwrap_or_default() };
     let mut nid = base_nid(hwnd);
     nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     nid.uCallbackMessage = WM_TRAY_ICON;
     nid.hIcon            = hicon;
     copy_wstr(&mut nid.szTip, "Greyscale Timer");
-    let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+    }
 }
 
-unsafe fn tray_remove(hwnd: HWND) {
+fn tray_remove(hwnd: HWND) {
     let nid = base_nid(hwnd);
-    let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+    }
 }
 
 /// Show a balloon-tip notification from the tray icon.
-unsafe fn balloon(hwnd: HWND, title: &str, body: &str) {
+fn balloon(hwnd: HWND, title: &str, body: &str) {
     let mut nid = base_nid(hwnd);
     nid.uFlags      = NIF_INFO;
     nid.dwInfoFlags = NIIF_INFO;
     copy_wstr(&mut nid.szInfoTitle, title);
     copy_wstr(&mut nid.szInfo, body);
-    let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
 }
 
 /// Show the right-click context menu at the current cursor position.
@@ -178,7 +193,7 @@ fn get_relevant_shutdown() -> Option<(NaiveDate, NaiveTime)> {
     None
 }
 
-unsafe fn show_menu(hwnd: HWND) {
+fn show_menu(hwnd: HWND) {
     // Keep the Vec<u16> alive until TrackPopupMenu returns (it blocks).
     let s_snooze = wstr("Snooze Shutdown (15 mins)");
     let s_on    = wstr("Enable Greyscale Now");
@@ -187,7 +202,7 @@ unsafe fn show_menu(hwnd: HWND) {
     let s_rel   = wstr("Reload Config");
     let s_exit  = wstr("Exit");
 
-    let hmenu = match CreatePopupMenu() {
+    let hmenu = match unsafe { CreatePopupMenu() } {
         Ok(m) => m,
         Err(_) => return,
     };
@@ -199,30 +214,32 @@ unsafe fn show_menu(hwnd: HWND) {
         false
     };
 
-    if can_snooze {
-        let _ = AppendMenuW(hmenu, MF_STRING, IDM_SNOOZE, PCWSTR(s_snooze.as_ptr()));
-        let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+    unsafe {
+        if can_snooze {
+            let _ = AppendMenuW(hmenu, MF_STRING, IDM_SNOOZE, PCWSTR(s_snooze.as_ptr()));
+            let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+        }
+
+        let _ = AppendMenuW(hmenu, MF_STRING,    IDM_GRAY_ON,  PCWSTR(s_on.as_ptr()));
+        let _ = AppendMenuW(hmenu, MF_STRING,    IDM_GRAY_OFF, PCWSTR(s_off.as_ptr()));
+        let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0,            PCWSTR::null());
+        let _ = AppendMenuW(hmenu, MF_STRING,    IDM_EDIT,     PCWSTR(s_edit.as_ptr()));
+        let _ = AppendMenuW(hmenu, MF_STRING,    IDM_RELOAD,   PCWSTR(s_rel.as_ptr()));
+        let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0,            PCWSTR::null());
+        let _ = AppendMenuW(hmenu, MF_STRING,    IDM_EXIT,     PCWSTR(s_exit.as_ptr()));
+
+        let mut pt = POINT { x: 0, y: 0 };
+        let _ = GetCursorPos(&mut pt);
+        let _ = SetForegroundWindow(hwnd); // required so the menu dismisses on click-away
+        let _ = TrackPopupMenu(
+            hmenu,
+            TPM_BOTTOMALIGN | TPM_LEFTALIGN,
+            pt.x, pt.y, 0,
+            hwnd,
+            None,
+        );
+        let _ = DestroyMenu(hmenu);
     }
-
-    let _ = AppendMenuW(hmenu, MF_STRING,    IDM_GRAY_ON,  PCWSTR(s_on.as_ptr()));
-    let _ = AppendMenuW(hmenu, MF_STRING,    IDM_GRAY_OFF, PCWSTR(s_off.as_ptr()));
-    let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0,            PCWSTR::null());
-    let _ = AppendMenuW(hmenu, MF_STRING,    IDM_EDIT,     PCWSTR(s_edit.as_ptr()));
-    let _ = AppendMenuW(hmenu, MF_STRING,    IDM_RELOAD,   PCWSTR(s_rel.as_ptr()));
-    let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0,            PCWSTR::null());
-    let _ = AppendMenuW(hmenu, MF_STRING,    IDM_EXIT,     PCWSTR(s_exit.as_ptr()));
-
-    let mut pt = POINT { x: 0, y: 0 };
-    let _ = GetCursorPos(&mut pt);
-    let _ = SetForegroundWindow(hwnd); // required so the menu dismisses on click-away
-    let _ = TrackPopupMenu(
-        hmenu,
-        TPM_BOTTOMALIGN | TPM_LEFTALIGN,
-        pt.x, pt.y, 0,
-        hwnd,
-        None,
-    );
-    let _ = DestroyMenu(hmenu);
     // s_on … s_exit are dropped here, after the menu is gone → no dangling pointers
 }
 
@@ -236,7 +253,7 @@ fn open_config() {
 
 fn reload_config(hwnd: HWND) {
     app().lock().unwrap().config = Config::load();
-    unsafe { balloon(hwnd, "Greyscale Timer", "Config reloaded.") };
+    balloon(hwnd, "Greyscale Timer", "Config reloaded.");
 }
 
 /// Initiate an OS shutdown with a 60-second grace window.
@@ -250,71 +267,73 @@ fn do_shutdown() {
 // ── Window procedure ──────────────────────────────────────────────────────────
 
 extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
-    unsafe {
-        match msg {
-            WM_TRAY_ICON => {
-                let event = (lp.0 as u32) & 0xFFFF;
-                if event == WM_RBUTTONUP {
-                    show_menu(hwnd);
-                } else if event == WM_LBUTTONDBLCLK {
-                    open_config();
-                }
+    match msg {
+        WM_TRAY_ICON => {
+            let event = (lp.0 as u32) & 0xFFFF;
+            if event == WM_RBUTTONUP {
+                show_menu(hwnd);
+            } else if event == WM_LBUTTONDBLCLK {
+                open_config();
             }
+        }
 
-            WM_COMMAND => {
-                match (wp.0 & 0xFFFF) as usize {
-                    IDM_SNOOZE => {
-                        if let Some((date, time)) = get_relevant_shutdown() {
-                            let mut state = app().lock().unwrap();
-                            state.snoozed_today = Some(date);
-                            state.snooze_at = Some(date.and_time(time) + chrono::Duration::minutes(15));
-                            // Mark original shutdown as fired so it doesn't trigger if snoozed early.
-                            state.fired_shutdown = Some(date);
+        WM_COMMAND => {
+            match (wp.0 & 0xFFFF) as usize {
+                IDM_SNOOZE => {
+                    if let Some((date, time)) = get_relevant_shutdown() {
+                        let mut state = app().lock().unwrap();
+                        state.snoozed_today = Some(date);
+                        state.snooze_at = Some(date.and_time(time) + chrono::Duration::minutes(15));
+                        // Mark original shutdown as fired so it doesn't trigger if snoozed early.
+                        state.fired_shutdown = Some(date);
 
-                            // Cancel any pending OS shutdown
-                            let _ = Command::new("shutdown").arg("/a").spawn();
+                        // Cancel any pending OS shutdown
+                        let _ = Command::new("shutdown").arg("/a").spawn();
 
-                            balloon(hwnd, "Greyscale Timer", "Shutdown snoozed for 15 minutes.");
-                        }
+                        balloon(hwnd, "Greyscale Timer", "Shutdown snoozed for 15 minutes.");
                     }
-                    IDM_GRAY_ON  => grayscale::set_grayscale(true),
-                    IDM_GRAY_OFF => grayscale::set_grayscale(false),
-                    IDM_EDIT     => open_config(),
-                    IDM_RELOAD   => reload_config(hwnd),
-                    IDM_EXIT     => {
-                        tray_remove(hwnd);
+                }
+                IDM_GRAY_ON  => grayscale::set_grayscale(true),
+                IDM_GRAY_OFF => grayscale::set_grayscale(false),
+                IDM_EDIT     => open_config(),
+                IDM_RELOAD   => reload_config(hwnd),
+                IDM_EXIT     => {
+                    tray_remove(hwnd);
+                    unsafe {
                         PostQuitMessage(0);
                     }
-                    _ => {}
                 }
+                _ => {}
             }
-
-            WM_DO_GRAYSCALE => {
-                grayscale::set_grayscale(true);
-                balloon(hwnd, "Greyscale Timer", "Greyscale colour filter enabled.");
-            }
-
-            WM_DO_GRAYSCALE_OFF => {
-                grayscale::set_grayscale(false);
-                balloon(hwnd, "Greyscale Timer", "Greyscale colour filter disabled.");
-            }
-
-            WM_DO_SHUTDOWN => {
-                balloon(hwnd, "Greyscale Timer", "Shutting down in 60 seconds…");
-                do_shutdown();
-            }
-
-            WM_DO_NOTIFY => {
-                let msg_text = app().lock().unwrap().notif_msg.clone();
-                balloon(hwnd, "Shutdown Warning", &msg_text);
-            }
-
-            WM_DESTROY => PostQuitMessage(0),
-
-            _ => return DefWindowProcW(hwnd, msg, wp, lp),
         }
-        LRESULT(0)
+
+        WM_DO_GRAYSCALE => {
+            grayscale::set_grayscale(true);
+            balloon(hwnd, "Greyscale Timer", "Greyscale colour filter enabled.");
+        }
+
+        WM_DO_GRAYSCALE_OFF => {
+            grayscale::set_grayscale(false);
+            balloon(hwnd, "Greyscale Timer", "Greyscale colour filter disabled.");
+        }
+
+        WM_DO_SHUTDOWN => {
+            balloon(hwnd, "Greyscale Timer", "Shutting down in 60 seconds…");
+            do_shutdown();
+        }
+
+        WM_DO_NOTIFY => {
+            let msg_text = app().lock().unwrap().notif_msg.clone();
+            balloon(hwnd, "Shutdown Warning", &msg_text);
+        }
+
+        WM_DESTROY => unsafe {
+            PostQuitMessage(0);
+        },
+
+        _ => return unsafe { DefWindowProcW(hwnd, msg, wp, lp) },
     }
+    LRESULT(0)
 }
 
 // ── Scheduler (background thread) ────────────────────────────────────────────
@@ -341,19 +360,24 @@ fn start_scheduler(hwnd: HWND) {
 
             // ── Greyscale timer ────────────────────────────────────────────
             if cfg.grayscale_enabled {
-                if cfg.grayscale_time == hm {
+                let current_time = now.time();
+                let start_t = NaiveTime::parse_from_str(&cfg.grayscale_time, "%H:%M").unwrap_or_else(|_| NaiveTime::from_hms_opt(22, 0, 0).unwrap());
+                let end_t = NaiveTime::parse_from_str(&cfg.grayscale_disable_time, "%H:%M").unwrap_or_else(|_| NaiveTime::from_hms_opt(7, 0, 0).unwrap());
+
+                if is_time_in_range(current_time, start_t, end_t) {
                     let already = app().lock().unwrap().fired_grayscale == Some(today);
                     if !already {
                         app().lock().unwrap().fired_grayscale = Some(today);
+                        app().lock().unwrap().fired_grayscale_off = None; // Reset so it can fire later
                         unsafe {
                             let _ = PostMessageW(hwnd, WM_DO_GRAYSCALE, WPARAM(0), LPARAM(0));
                         }
                     }
-                }
-                if cfg.grayscale_disable_time == hm {
+                } else {
                     let already = app().lock().unwrap().fired_grayscale_off == Some(today);
                     if !already {
                         app().lock().unwrap().fired_grayscale_off = Some(today);
+                        app().lock().unwrap().fired_grayscale = None; // Reset so it can fire later
                         unsafe {
                             let _ = PostMessageW(hwnd, WM_DO_GRAYSCALE_OFF, WPARAM(0), LPARAM(0));
                         }
@@ -433,8 +457,8 @@ fn start_scheduler(hwnd: HWND) {
 fn main() {
     // ── Single-instance guard via named kernel mutex ───────────────────────
     let _mutex_guard;
+    let name = wstr("Local\\GrayscaleTimerSingleInstance");
     unsafe {
-        let name = wstr("Local\\GrayscaleTimerSingleInstance");
         match CreateMutexW(None, true, PCWSTR(name.as_ptr())) {
             Ok(h) => {
                 if GetLastError() == ERROR_ALREADY_EXISTS {
@@ -448,10 +472,9 @@ fn main() {
 
     // ── Load config, initialise global state ──────────────────────────────
     let cfg = Config::load();
-    let activate_now = cfg.activate_on_start;
 
     APP.set(Arc::new(Mutex::new(State {
-        config:               cfg,
+        config:               cfg.clone(),
         fired_grayscale:      None,
         fired_grayscale_off:  None,
         fired_shutdown:       None,
@@ -461,46 +484,87 @@ fn main() {
         notif_msg:            String::new(),
     }))).ok();
 
-    if activate_now {
-        grayscale::set_grayscale(true);
+    if cfg.grayscale_enabled {
+        let now = Local::now();
+        let current_time = now.time();
+        let today = now.date_naive();
+        let start = NaiveTime::parse_from_str(&cfg.grayscale_time, "%H:%M").unwrap_or_else(|_| NaiveTime::from_hms_opt(22, 0, 0).unwrap());
+        let end = NaiveTime::parse_from_str(&cfg.grayscale_disable_time, "%H:%M").unwrap_or_else(|_| NaiveTime::from_hms_opt(7, 0, 0).unwrap());
+
+        if is_time_in_range(current_time, start, end) {
+            grayscale::set_grayscale(true);
+            app().lock().unwrap().fired_grayscale = Some(today);
+        } else {
+            grayscale::set_grayscale(false);
+            app().lock().unwrap().fired_grayscale_off = Some(today);
+        }
     }
 
+    // ── Register window class ──────────────────────────────────────────
+    let hinstance = unsafe { GetModuleHandleW(PCWSTR::null()).unwrap_or_default() };
+    let class_name = wstr("GrayscaleTimerMsgWnd");
+
+    let wc = WNDCLASSEXW {
+        cbSize: size_of::<WNDCLASSEXW>() as u32,
+        lpfnWndProc: Some(wnd_proc),
+        hInstance: HINSTANCE(hinstance.0 as *mut _),
+        lpszClassName: PCWSTR(class_name.as_ptr()),
+        ..unsafe { mem::zeroed() }
+    };
     unsafe {
-        // ── Register window class ──────────────────────────────────────────
-        let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
-        let class_name = wstr("GrayscaleTimerMsgWnd");
-
-        let wc = WNDCLASSEXW {
-            cbSize:        size_of::<WNDCLASSEXW>() as u32,
-            lpfnWndProc:   Some(wnd_proc),
-            hInstance:     HINSTANCE(hinstance.0 as *mut _),
-            lpszClassName: PCWSTR(class_name.as_ptr()),
-            ..mem::zeroed()
-        };
         let _ = RegisterClassExW(&wc);
+    }
 
-        // ── Create hidden message-only window ──────────────────────────────
-        // HWND_MESSAGE (-3) as parent → no visible window, no taskbar entry.
-        let hwnd = match CreateWindowExW(
+    // ── Create hidden message-only window ──────────────────────────────
+    // HWND_MESSAGE (-3) as parent → no visible window, no taskbar entry.
+    let hwnd = match unsafe {
+        CreateWindowExW(
             WINDOW_EX_STYLE(0),
             PCWSTR(class_name.as_ptr()),
             PCWSTR(wstr("Greyscale Timer").as_ptr()),
             WINDOW_STYLE(0),
-            0, 0, 1, 1,
+            0,
+            0,
+            1,
+            1,
             HWND(-3isize as *mut _), // HWND_MESSAGE
             HMENU(std::ptr::null_mut()),
             HINSTANCE(hinstance.0 as *mut _),
             None,
-        ) {
-            Ok(h) => h,
-            Err(_) => return,
-        };
+        )
+    } {
+        Ok(h) => h,
+        Err(_) => return,
+    };
 
-        tray_add(hwnd);
-        start_scheduler(hwnd);
+    tray_add(hwnd);
 
-        // ── Message loop ───────────────────────────────────────────────────
-        let mut msg = MSG::default();
+    // Trigger initial balloon if needed
+    let cfg = &app().lock().unwrap().config;
+    if cfg.grayscale_enabled {
+        let now = Local::now().time();
+        let start = NaiveTime::parse_from_str(&cfg.grayscale_time, "%H:%M").unwrap_or_else(|_| NaiveTime::from_hms_opt(22, 0, 0).unwrap());
+        let end = NaiveTime::parse_from_str(&cfg.grayscale_disable_time, "%H:%M").unwrap_or_else(|_| NaiveTime::from_hms_opt(7, 0, 0).unwrap());
+
+        unsafe {
+            if is_time_in_range(now, start, end) {
+                let _ = PostMessageW(hwnd, WM_DO_GRAYSCALE, WPARAM(0), LPARAM(0));
+            } else {
+                // If it's disabled at startup, we usually don't need a balloon
+                // saying "Greyscale disabled" unless it was previously on.
+                // But the user said: "Even if the filter was already enabled...
+                // you want the balloon notification to appear again if the app starts".
+                // So we show it.
+                let _ = PostMessageW(hwnd, WM_DO_GRAYSCALE_OFF, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+
+    start_scheduler(hwnd);
+
+    // ── Message loop ───────────────────────────────────────────────────
+    let mut msg = MSG::default();
+    unsafe {
         while GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
