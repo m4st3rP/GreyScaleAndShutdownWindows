@@ -1,12 +1,12 @@
-//! Entry point.  Creates a hidden message-only window, installs a system-tray
+//! Entry point.  Creates a hidden top-level window, installs a system-tray
 //! icon, starts a background scheduler thread, and runs the Win32 message loop.
 //!
-//! Tray right-click menu
-//! ─────────────────────
+//! Tray menu (opens on click)
+//! ──────────────────────────
 //!   Enable Greyscale Now
 //!   Disable Greyscale
 //!   ─────────────────────
-//!   Edit Config in Notepad   (double-clicking the icon also opens it)
+//!   Edit Config in Notepad
 //!   Reload Config
 //!   ─────────────────────
 //!   Exit
@@ -49,8 +49,8 @@ use windows::{
                 PostMessageW, PostQuitMessage, RegisterClassExW, SetForegroundWindow,
                 TrackPopupMenu, TranslateMessage, HMENU, IDI_APPLICATION, MF_SEPARATOR,
                 MF_STRING, MSG, TPM_BOTTOMALIGN, TPM_LEFTALIGN, WINDOW_EX_STYLE,
-                WINDOW_STYLE, WM_APP, WM_COMMAND, WM_DESTROY, WM_LBUTTONDBLCLK, WM_RBUTTONUP,
-                WNDCLASSEXW,
+                WINDOW_STYLE, WM_APP, WM_COMMAND, WM_DESTROY, WM_LBUTTONDBLCLK,
+                WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSEXW,
             },
         },
     },
@@ -198,7 +198,7 @@ fn show_menu(hwnd: HWND) {
     let s_snooze = wstr("Snooze Shutdown (15 mins)");
     let s_on    = wstr("Enable Greyscale Now");
     let s_off   = wstr("Disable Greyscale");
-    let s_edit  = wstr("Edit Config in Notepad   (or double-click icon)");
+    let s_edit  = wstr("Edit Config in Notepad");
     let s_rel   = wstr("Reload Config");
     let s_exit  = wstr("Exit");
 
@@ -270,10 +270,8 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRE
     match msg {
         WM_TRAY_ICON => {
             let event = (lp.0 as u32) & 0xFFFF;
-            if event == WM_RBUTTONUP {
+            if event == WM_RBUTTONUP || event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
                 show_menu(hwnd);
-            } else if event == WM_LBUTTONDBLCLK {
-                open_config();
             }
         }
 
@@ -515,8 +513,9 @@ fn main() {
         let _ = RegisterClassExW(&wc);
     }
 
-    // ── Create hidden message-only window ──────────────────────────────
-    // HWND_MESSAGE (-3) as parent → no visible window, no taskbar entry.
+    // ── Create hidden top-level window ──────────────────────────────
+    // Using HWND(0) as parent instead of HWND_MESSAGE ensures we receive
+    // tray icon notifications.
     let hwnd = match unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -527,7 +526,7 @@ fn main() {
             0,
             1,
             1,
-            HWND(-3isize as *mut _), // HWND_MESSAGE
+            HWND(std::ptr::null_mut()),
             HMENU(std::ptr::null_mut()),
             HINSTANCE(hinstance.0 as *mut _),
             None,
