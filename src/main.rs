@@ -40,17 +40,19 @@ use windows::{
         },
         UI::{
             Shell::{
-                Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP,
-                NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+                Shell_NotifyIconW, NIN_SELECT, NOTIFYICONDATAW, NIF_ICON,
+                NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE,
+                NIM_MODIFY, NIM_SETVERSION, NOTIFYICON_VERSION_4,
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-                DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW,
+                DispatchMessageW, GetCursorPos, GetMessageW, LoadCursorW, LoadIconW,
                 PostMessageW, PostQuitMessage, RegisterClassExW, SetForegroundWindow,
-                TrackPopupMenu, TranslateMessage, HMENU, IDI_APPLICATION, MF_SEPARATOR,
-                MF_STRING, MSG, TPM_BOTTOMALIGN, TPM_LEFTALIGN, WINDOW_EX_STYLE,
-                WINDOW_STYLE, WM_APP, WM_COMMAND, WM_DESTROY, WM_LBUTTONDBLCLK,
-                WM_LBUTTONUP, WM_RBUTTONUP, WNDCLASSEXW,
+                TrackPopupMenu, TranslateMessage, HMENU, IDC_ARROW, IDI_APPLICATION,
+                MF_SEPARATOR, MF_STRING, MSG, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+                TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND,
+                WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL,
+                WM_RBUTTONUP, WNDCLASSEXW,
             },
         },
     },
@@ -58,8 +60,11 @@ use windows::{
 
 use config::Config;
 
+use windows::Win32::UI::WindowsAndMessaging::WM_USER;
+
 // ── Custom window messages ────────────────────────────────────────────────────
 const WM_TRAY_ICON:        u32 = WM_APP + 1;
+const NIN_KEYSELECT:       u32 = WM_USER + 1;
 const WM_DO_GRAYSCALE:     u32 = WM_APP + 2;
 const WM_DO_GRAYSCALE_OFF: u32 = WM_APP + 3;
 const WM_DO_SHUTDOWN:      u32 = WM_APP + 4;
@@ -139,8 +144,12 @@ fn tray_add(hwnd: HWND) {
     nid.uCallbackMessage = WM_TRAY_ICON;
     nid.hIcon            = hicon;
     copy_wstr(&mut nid.szTip, "Greyscale Timer");
+
+    // NOTIFYICON_VERSION_4 (Windows Vista+) behavior.
     unsafe {
+        nid.Anonymous.uVersion = NOTIFYICON_VERSION_4;
         let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+        let _ = Shell_NotifyIconW(NIM_SETVERSION, &nid);
     }
 }
 
@@ -230,14 +239,19 @@ fn show_menu(hwnd: HWND) {
 
         let mut pt = POINT { x: 0, y: 0 };
         let _ = GetCursorPos(&mut pt);
-        let _ = SetForegroundWindow(hwnd); // required so the menu dismisses on click-away
+
+        // Microsoft KB135610: To have TrackPopupMenu function correctly,
+        // we must set the window to the foreground before the call, and
+        // post a WM_NULL message after.
+        let _ = SetForegroundWindow(hwnd);
         let _ = TrackPopupMenu(
             hmenu,
-            TPM_BOTTOMALIGN | TPM_LEFTALIGN,
+            TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RIGHTBUTTON,
             pt.x, pt.y, 0,
             hwnd,
             None,
         );
+        let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(hmenu);
     }
     // s_on … s_exit are dropped here, after the menu is gone → no dangling pointers
@@ -270,7 +284,12 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRE
     match msg {
         WM_TRAY_ICON => {
             let event = (lp.0 as u32) & 0xFFFF;
-            if event == WM_RBUTTONUP || event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
+            // In Version 4, WM_CONTEXTMENU is sent for right-clicks/Menu key,
+            // and NIN_SELECT/NIN_KEYSELECT for left-clicks/Enter.
+            if event == WM_RBUTTONUP || event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK
+                || event == (WM_CONTEXTMENU as u16) as u32
+                || event == NIN_SELECT || event == NIN_KEYSELECT
+            {
                 show_menu(hwnd);
             }
         }
@@ -507,6 +526,7 @@ fn main() {
         lpfnWndProc: Some(wnd_proc),
         hInstance: HINSTANCE(hinstance.0 as *mut _),
         lpszClassName: PCWSTR(class_name.as_ptr()),
+        hCursor: unsafe { LoadCursorW(None, IDC_ARROW).unwrap_or_default() },
         ..unsafe { mem::zeroed() }
     };
     unsafe {
