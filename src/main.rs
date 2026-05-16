@@ -1,12 +1,12 @@
-//! Entry point.  Creates a hidden message-only window, installs a system-tray
+//! Entry point.  Creates a hidden top-level window, installs a system-tray
 //! icon, starts a background scheduler thread, and runs the Win32 message loop.
 //!
-//! Tray right-click menu
-//! ─────────────────────
+//! Tray menu (opens on click)
+//! ──────────────────────────
 //!   Enable Greyscale Now
 //!   Disable Greyscale
 //!   ─────────────────────
-//!   Edit Config in Notepad   (double-clicking the icon also opens it)
+//!   Edit Config in Notepad
 //!   Reload Config
 //!   ─────────────────────
 //!   Exit
@@ -40,23 +40,26 @@ use windows::{
         },
         UI::{
             Shell::{
-                Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP,
-                NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+                Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON,
+                NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE,
+                NIM_MODIFY,
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
-                DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW,
+                DispatchMessageW, GetCursorPos, GetMessageW, LoadCursorW, LoadIconW,
                 PostMessageW, PostQuitMessage, RegisterClassExW, SetForegroundWindow,
-                TrackPopupMenu, TranslateMessage, HMENU, IDI_APPLICATION, MF_SEPARATOR,
-                MF_STRING, MSG, TPM_BOTTOMALIGN, TPM_LEFTALIGN, WINDOW_EX_STYLE,
-                WINDOW_STYLE, WM_APP, WM_COMMAND, WM_DESTROY, WM_LBUTTONDBLCLK, WM_RBUTTONUP,
-                WNDCLASSEXW,
+                TrackPopupMenu, TranslateMessage, HMENU, IDC_ARROW, IDI_APPLICATION,
+                MF_SEPARATOR, MF_STRING, MSG, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+                TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_APP, WM_COMMAND,
+                WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL,
+                WM_RBUTTONUP, WNDCLASSEXW,
             },
         },
     },
 };
 
 use config::Config;
+
 
 // ── Custom window messages ────────────────────────────────────────────────────
 const WM_TRAY_ICON:        u32 = WM_APP + 1;
@@ -99,6 +102,7 @@ fn app() -> &'static Arc<Mutex<State>> {
 struct SendHwnd(isize);
 unsafe impl Send for SendHwnd {}
 
+
 // ── UTF-16 helpers ────────────────────────────────────────────────────────────
 
 fn wstr(s: &str) -> Vec<u16> {
@@ -139,6 +143,7 @@ fn tray_add(hwnd: HWND) {
     nid.uCallbackMessage = WM_TRAY_ICON;
     nid.hIcon            = hicon;
     copy_wstr(&mut nid.szTip, "Greyscale Timer");
+
     unsafe {
         let _ = Shell_NotifyIconW(NIM_ADD, &nid);
     }
@@ -166,8 +171,7 @@ fn balloon(hwnd: HWND, title: &str, body: &str) {
 /// Show the right-click context menu at the current cursor position.
 /// Returns the (date, original_time) of the shutdown that is currently relevant
 /// for snoozing (within the notification window or just fired).
-fn get_relevant_shutdown() -> Option<(NaiveDate, NaiveTime)> {
-    let state = app().lock().unwrap();
+fn get_relevant_shutdown(state: &State) -> Option<(NaiveDate, NaiveTime)> {
     let cfg = &state.config;
     if !cfg.shutdown_enabled {
         return None;
@@ -194,11 +198,10 @@ fn get_relevant_shutdown() -> Option<(NaiveDate, NaiveTime)> {
 }
 
 fn show_menu(hwnd: HWND) {
-    // Keep the Vec<u16> alive until TrackPopupMenu returns (it blocks).
     let s_snooze = wstr("Snooze Shutdown (15 mins)");
     let s_on    = wstr("Enable Greyscale Now");
     let s_off   = wstr("Disable Greyscale");
-    let s_edit  = wstr("Edit Config in Notepad   (or double-click icon)");
+    let s_edit  = wstr("Edit Config in Notepad");
     let s_rel   = wstr("Reload Config");
     let s_exit  = wstr("Exit");
 
@@ -207,11 +210,13 @@ fn show_menu(hwnd: HWND) {
         Err(_) => return,
     };
 
-    let can_snooze = if let Some((date, _)) = get_relevant_shutdown() {
+    let can_snooze = {
         let state = app().lock().unwrap();
-        state.snoozed_today != Some(date)
-    } else {
-        false
+        if let Some((date, _)) = get_relevant_shutdown(&state) {
+            state.snoozed_today != Some(date)
+        } else {
+            false
+        }
     };
 
     unsafe {
@@ -230,14 +235,19 @@ fn show_menu(hwnd: HWND) {
 
         let mut pt = POINT { x: 0, y: 0 };
         let _ = GetCursorPos(&mut pt);
-        let _ = SetForegroundWindow(hwnd); // required so the menu dismisses on click-away
+
+        // Microsoft KB135610: To have TrackPopupMenu function correctly,
+        // we must set the window to the foreground before the call, and
+        // post a WM_NULL message after.
+        let _ = SetForegroundWindow(hwnd);
         let _ = TrackPopupMenu(
             hmenu,
-            TPM_BOTTOMALIGN | TPM_LEFTALIGN,
+            TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RIGHTBUTTON,
             pt.x, pt.y, 0,
             hwnd,
             None,
         );
+        let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(hmenu);
     }
     // s_on … s_exit are dropped here, after the menu is gone → no dangling pointers
@@ -270,18 +280,18 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRE
     match msg {
         WM_TRAY_ICON => {
             let event = (lp.0 as u32) & 0xFFFF;
-            if event == WM_RBUTTONUP {
+
+            // Standard tray icon mouse events
+            if event == WM_RBUTTONUP || event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
                 show_menu(hwnd);
-            } else if event == WM_LBUTTONDBLCLK {
-                open_config();
             }
         }
 
         WM_COMMAND => {
             match (wp.0 & 0xFFFF) as usize {
                 IDM_SNOOZE => {
-                    if let Some((date, time)) = get_relevant_shutdown() {
-                        let mut state = app().lock().unwrap();
+                    let mut state = app().lock().unwrap();
+                    if let Some((date, time)) = get_relevant_shutdown(&state) {
                         state.snoozed_today = Some(date);
                         state.snooze_at = Some(date.and_time(time) + chrono::Duration::minutes(15));
                         // Mark original shutdown as fired so it doesn't trigger if snoozed early.
@@ -509,25 +519,26 @@ fn main() {
         lpfnWndProc: Some(wnd_proc),
         hInstance: HINSTANCE(hinstance.0 as *mut _),
         lpszClassName: PCWSTR(class_name.as_ptr()),
+        hCursor: unsafe { LoadCursorW(None, IDC_ARROW).unwrap_or_default() },
         ..unsafe { mem::zeroed() }
     };
     unsafe {
         let _ = RegisterClassExW(&wc);
     }
 
-    // ── Create hidden message-only window ──────────────────────────────
-    // HWND_MESSAGE (-3) as parent → no visible window, no taskbar entry.
+    // ── Create hidden top-level window ──────────────────────────────
+    // Using WS_POPUP ensures it's a top-level window without decor.
     let hwnd = match unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             PCWSTR(class_name.as_ptr()),
             PCWSTR(wstr("Greyscale Timer").as_ptr()),
-            WINDOW_STYLE(0),
+            windows::Win32::UI::WindowsAndMessaging::WS_POPUP,
             0,
             0,
             1,
             1,
-            HWND(-3isize as *mut _), // HWND_MESSAGE
+            HWND(std::ptr::null_mut()),
             HMENU(std::ptr::null_mut()),
             HINSTANCE(hinstance.0 as *mut _),
             None,
