@@ -40,19 +40,19 @@ use windows::{
         },
         UI::{
             Shell::{
-                Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON,
+                Shell_NotifyIconW, NIN_SELECT, NOTIFYICONDATAW, NIF_ICON,
                 NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE,
-                NIM_MODIFY,
+                NIM_MODIFY, NIM_SETVERSION, NOTIFYICON_VERSION_4,
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
                 DispatchMessageW, GetCursorPos, GetMessageW, LoadCursorW, LoadIconW,
                 PostMessageW, PostQuitMessage, RegisterClassExW, SetForegroundWindow,
-                TrackPopupMenu, TranslateMessage, HMENU, IDC_ARROW, IDI_APPLICATION,
-                MF_SEPARATOR, MF_STRING, MSG, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
-                TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_APP, WM_COMMAND,
-                WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL,
-                WM_RBUTTONUP, WNDCLASSEXW,
+                TrackPopupMenuEx, TranslateMessage, HMENU, IDC_ARROW, IDI_APPLICATION,
+                MF_SEPARATOR, MF_STRING, MSG, SW_HIDE, ShowWindow, TPM_LEFTALIGN,
+                TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_APP, WM_COMMAND,
+                WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL,
+                WM_RBUTTONUP, WM_USER, WNDCLASSEXW,
             },
         },
     },
@@ -63,6 +63,7 @@ use config::Config;
 
 // ── Custom window messages ────────────────────────────────────────────────────
 const WM_TRAY_ICON:        u32 = WM_APP + 1;
+const NIN_KEYSELECT:       u32 = WM_USER + 1;
 const WM_DO_GRAYSCALE:     u32 = WM_APP + 2;
 const WM_DO_GRAYSCALE_OFF: u32 = WM_APP + 3;
 const WM_DO_SHUTDOWN:      u32 = WM_APP + 4;
@@ -145,7 +146,9 @@ fn tray_add(hwnd: HWND) {
     copy_wstr(&mut nid.szTip, "Greyscale Timer");
 
     unsafe {
+        nid.Anonymous.uVersion = NOTIFYICON_VERSION_4;
         let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+        let _ = Shell_NotifyIconW(NIM_SETVERSION, &nid);
     }
 }
 
@@ -197,6 +200,32 @@ fn get_relevant_shutdown(state: &State) -> Option<(NaiveDate, NaiveTime)> {
     None
 }
 
+fn handle_command(hwnd: HWND, id: usize) {
+    match id {
+        IDM_SNOOZE => {
+            let mut state = app().lock().unwrap();
+            if let Some((date, time)) = get_relevant_shutdown(&state) {
+                state.snoozed_today = Some(date);
+                state.snooze_at = Some(date.and_time(time) + chrono::Duration::minutes(15));
+                state.fired_shutdown = Some(date);
+                let _ = Command::new("shutdown").arg("/a").spawn();
+                balloon(hwnd, "Greyscale Timer", "Shutdown snoozed for 15 minutes.");
+            }
+        }
+        IDM_GRAY_ON  => grayscale::set_grayscale(true),
+        IDM_GRAY_OFF => grayscale::set_grayscale(false),
+        IDM_EDIT     => open_config(),
+        IDM_RELOAD   => reload_config(hwnd),
+        IDM_EXIT     => {
+            tray_remove(hwnd);
+            unsafe {
+                PostQuitMessage(0);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn show_menu(hwnd: HWND) {
     let s_snooze = wstr("Snooze Shutdown (15 mins)");
     let s_on    = wstr("Enable Greyscale Now");
@@ -240,17 +269,19 @@ fn show_menu(hwnd: HWND) {
         // we must set the window to the foreground before the call, and
         // post a WM_NULL message after.
         let _ = SetForegroundWindow(hwnd);
-        let _ = TrackPopupMenu(
+        let cmd = TrackPopupMenuEx(
             hmenu,
-            TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RIGHTBUTTON,
-            pt.x, pt.y, 0,
+            (TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD).0,
+            pt.x, pt.y,
             hwnd,
             None,
         );
+        if cmd.0 != 0 {
+            handle_command(hwnd, cmd.0 as usize);
+        }
         let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(hmenu);
     }
-    // s_on … s_exit are dropped here, after the menu is gone → no dangling pointers
 }
 
 // ── Actions ───────────────────────────────────────────────────────────────────
@@ -281,40 +312,18 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRE
         WM_TRAY_ICON => {
             let event = (lp.0 as u32) & 0xFFFF;
 
-            // Standard tray icon mouse events
-            if event == WM_RBUTTONUP || event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
+            // Version 4 sends WM_CONTEXTMENU for right-click/Menu key,
+            // and NIN_SELECT/NIN_KEYSELECT for left-click/Enter.
+            if event == WM_RBUTTONUP || event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK
+                || event == (WM_CONTEXTMENU as u16) as u32
+                || event == NIN_SELECT || event == NIN_KEYSELECT
+            {
                 show_menu(hwnd);
             }
         }
 
         WM_COMMAND => {
-            match (wp.0 & 0xFFFF) as usize {
-                IDM_SNOOZE => {
-                    let mut state = app().lock().unwrap();
-                    if let Some((date, time)) = get_relevant_shutdown(&state) {
-                        state.snoozed_today = Some(date);
-                        state.snooze_at = Some(date.and_time(time) + chrono::Duration::minutes(15));
-                        // Mark original shutdown as fired so it doesn't trigger if snoozed early.
-                        state.fired_shutdown = Some(date);
-
-                        // Cancel any pending OS shutdown
-                        let _ = Command::new("shutdown").arg("/a").spawn();
-
-                        balloon(hwnd, "Greyscale Timer", "Shutdown snoozed for 15 minutes.");
-                    }
-                }
-                IDM_GRAY_ON  => grayscale::set_grayscale(true),
-                IDM_GRAY_OFF => grayscale::set_grayscale(false),
-                IDM_EDIT     => open_config(),
-                IDM_RELOAD   => reload_config(hwnd),
-                IDM_EXIT     => {
-                    tray_remove(hwnd);
-                    unsafe {
-                        PostQuitMessage(0);
-                    }
-                }
-                _ => {}
-            }
+            handle_command(hwnd, (wp.0 & 0xFFFF) as usize);
         }
 
         WM_DO_GRAYSCALE => {
@@ -549,6 +558,9 @@ fn main() {
     };
 
     tray_add(hwnd);
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_HIDE);
+    }
 
     // Trigger initial balloon if needed
     let cfg = &app().lock().unwrap().config;
