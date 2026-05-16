@@ -22,6 +22,8 @@ mod grayscale;
 
 use std::{
     collections::HashSet,
+    fs::OpenOptions,
+    io::Write,
     mem::{self, size_of},
     process::Command,
     sync::{Arc, Mutex, OnceLock},
@@ -40,9 +42,9 @@ use windows::{
         },
         UI::{
             Shell::{
-                Shell_NotifyIconW, NIN_SELECT, NOTIFYICONDATAW, NIF_ICON,
+                Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON,
                 NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE,
-                NIM_MODIFY, NIM_SETVERSION, NOTIFYICON_VERSION_4,
+                NIM_MODIFY,
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
@@ -50,8 +52,8 @@ use windows::{
                 PostMessageW, PostQuitMessage, RegisterClassExW, SetForegroundWindow,
                 TrackPopupMenu, TranslateMessage, HMENU, IDC_ARROW, IDI_APPLICATION,
                 MF_SEPARATOR, MF_STRING, MSG, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
-                TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_COMMAND,
-                WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL,
+                TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_APP, WM_COMMAND,
+                WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_NULL,
                 WM_RBUTTONUP, WNDCLASSEXW,
             },
         },
@@ -60,11 +62,9 @@ use windows::{
 
 use config::Config;
 
-use windows::Win32::UI::WindowsAndMessaging::WM_USER;
 
 // ── Custom window messages ────────────────────────────────────────────────────
 const WM_TRAY_ICON:        u32 = WM_APP + 1;
-const NIN_KEYSELECT:       u32 = WM_USER + 1;
 const WM_DO_GRAYSCALE:     u32 = WM_APP + 2;
 const WM_DO_GRAYSCALE_OFF: u32 = WM_APP + 3;
 const WM_DO_SHUTDOWN:      u32 = WM_APP + 4;
@@ -103,6 +103,17 @@ fn app() -> &'static Arc<Mutex<State>> {
 // ── HWND wrapper that is Send so we can move it into the scheduler thread ─────
 struct SendHwnd(isize);
 unsafe impl Send for SendHwnd {}
+
+// ── Logging ───────────────────────────────────────────────────────────────────
+
+fn log_to_file(msg: &str) {
+    let temp = std::env::var("TEMP").unwrap_or_else(|_| ".".to_string());
+    let path = std::path::Path::new(&temp).join("grayscale-timer.log");
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let now = Local::now().format("%Y-%m-%d %H:%M:%S");
+        let _ = writeln!(file, "[{}] {}", now, msg);
+    }
+}
 
 // ── UTF-16 helpers ────────────────────────────────────────────────────────────
 
@@ -145,11 +156,9 @@ fn tray_add(hwnd: HWND) {
     nid.hIcon            = hicon;
     copy_wstr(&mut nid.szTip, "Greyscale Timer");
 
-    // NOTIFYICON_VERSION_4 (Windows Vista+) behavior.
     unsafe {
-        nid.Anonymous.uVersion = NOTIFYICON_VERSION_4;
-        let _ = Shell_NotifyIconW(NIM_ADD, &nid);
-        let _ = Shell_NotifyIconW(NIM_SETVERSION, &nid);
+        let res = Shell_NotifyIconW(NIM_ADD, &nid);
+        log_to_file(&format!("Shell_NotifyIconW(NIM_ADD) result: {:?}", res));
     }
 }
 
@@ -203,6 +212,7 @@ fn get_relevant_shutdown() -> Option<(NaiveDate, NaiveTime)> {
 }
 
 fn show_menu(hwnd: HWND) {
+    log_to_file("show_menu called");
     // Keep the Vec<u16> alive until TrackPopupMenu returns (it blocks).
     let s_snooze = wstr("Snooze Shutdown (15 mins)");
     let s_on    = wstr("Enable Greyscale Now");
@@ -284,12 +294,10 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRE
     match msg {
         WM_TRAY_ICON => {
             let event = (lp.0 as u32) & 0xFFFF;
-            // In Version 4, WM_CONTEXTMENU is sent for right-clicks/Menu key,
-            // and NIN_SELECT/NIN_KEYSELECT for left-clicks/Enter.
-            if event == WM_RBUTTONUP || event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK
-                || event == (WM_CONTEXTMENU as u16) as u32
-                || event == NIN_SELECT || event == NIN_KEYSELECT
-            {
+            log_to_file(&format!("WM_TRAY_ICON: event=0x{:04X}", event));
+
+            // Standard tray icon mouse events
+            if event == WM_RBUTTONUP || event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
                 show_menu(hwnd);
             }
         }
@@ -472,6 +480,7 @@ fn start_scheduler(hwnd: HWND) {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
+    log_to_file("Application starting...");
     // ── Single-instance guard via named kernel mutex ───────────────────────
     let _mutex_guard;
     let name = wstr("Local\\GrayscaleTimerSingleInstance");
@@ -530,18 +539,18 @@ fn main() {
         ..unsafe { mem::zeroed() }
     };
     unsafe {
-        let _ = RegisterClassExW(&wc);
+        let res = RegisterClassExW(&wc);
+        log_to_file(&format!("RegisterClassExW result: {}", res));
     }
 
     // ── Create hidden top-level window ──────────────────────────────
-    // Using HWND(0) as parent instead of HWND_MESSAGE ensures we receive
-    // tray icon notifications.
+    // Using WS_POPUP ensures it's a top-level window without decor.
     let hwnd = match unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             PCWSTR(class_name.as_ptr()),
             PCWSTR(wstr("Greyscale Timer").as_ptr()),
-            WINDOW_STYLE(0),
+            windows::Win32::UI::WindowsAndMessaging::WS_POPUP,
             0,
             0,
             1,
