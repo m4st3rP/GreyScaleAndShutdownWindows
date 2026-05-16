@@ -22,8 +22,6 @@ mod grayscale;
 
 use std::{
     collections::HashSet,
-    fs::OpenOptions,
-    io::Write,
     mem::{self, size_of},
     process::Command,
     sync::{Arc, Mutex, OnceLock},
@@ -104,16 +102,6 @@ fn app() -> &'static Arc<Mutex<State>> {
 struct SendHwnd(isize);
 unsafe impl Send for SendHwnd {}
 
-// ── Logging ───────────────────────────────────────────────────────────────────
-
-fn log_to_file(msg: &str) {
-    let temp = std::env::var("TEMP").unwrap_or_else(|_| ".".to_string());
-    let path = std::path::Path::new(&temp).join("grayscale-timer.log");
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let now = Local::now().format("%Y-%m-%d %H:%M:%S");
-        let _ = writeln!(file, "[{}] {}", now, msg);
-    }
-}
 
 // ── UTF-16 helpers ────────────────────────────────────────────────────────────
 
@@ -157,8 +145,7 @@ fn tray_add(hwnd: HWND) {
     copy_wstr(&mut nid.szTip, "Greyscale Timer");
 
     unsafe {
-        let res = Shell_NotifyIconW(NIM_ADD, &nid);
-        log_to_file(&format!("Shell_NotifyIconW(NIM_ADD) result: {:?}", res));
+        let _ = Shell_NotifyIconW(NIM_ADD, &nid);
     }
 }
 
@@ -184,8 +171,7 @@ fn balloon(hwnd: HWND, title: &str, body: &str) {
 /// Show the right-click context menu at the current cursor position.
 /// Returns the (date, original_time) of the shutdown that is currently relevant
 /// for snoozing (within the notification window or just fired).
-fn get_relevant_shutdown() -> Option<(NaiveDate, NaiveTime)> {
-    let state = app().lock().unwrap();
+fn get_relevant_shutdown(state: &State) -> Option<(NaiveDate, NaiveTime)> {
     let cfg = &state.config;
     if !cfg.shutdown_enabled {
         return None;
@@ -212,8 +198,6 @@ fn get_relevant_shutdown() -> Option<(NaiveDate, NaiveTime)> {
 }
 
 fn show_menu(hwnd: HWND) {
-    log_to_file("show_menu called");
-    // Keep the Vec<u16> alive until TrackPopupMenu returns (it blocks).
     let s_snooze = wstr("Snooze Shutdown (15 mins)");
     let s_on    = wstr("Enable Greyscale Now");
     let s_off   = wstr("Disable Greyscale");
@@ -226,11 +210,13 @@ fn show_menu(hwnd: HWND) {
         Err(_) => return,
     };
 
-    let can_snooze = if let Some((date, _)) = get_relevant_shutdown() {
+    let can_snooze = {
         let state = app().lock().unwrap();
-        state.snoozed_today != Some(date)
-    } else {
-        false
+        if let Some((date, _)) = get_relevant_shutdown(&state) {
+            state.snoozed_today != Some(date)
+        } else {
+            false
+        }
     };
 
     unsafe {
@@ -294,7 +280,6 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRE
     match msg {
         WM_TRAY_ICON => {
             let event = (lp.0 as u32) & 0xFFFF;
-            log_to_file(&format!("WM_TRAY_ICON: event=0x{:04X}", event));
 
             // Standard tray icon mouse events
             if event == WM_RBUTTONUP || event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
@@ -305,8 +290,8 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRE
         WM_COMMAND => {
             match (wp.0 & 0xFFFF) as usize {
                 IDM_SNOOZE => {
-                    if let Some((date, time)) = get_relevant_shutdown() {
-                        let mut state = app().lock().unwrap();
+                    let mut state = app().lock().unwrap();
+                    if let Some((date, time)) = get_relevant_shutdown(&state) {
                         state.snoozed_today = Some(date);
                         state.snooze_at = Some(date.and_time(time) + chrono::Duration::minutes(15));
                         // Mark original shutdown as fired so it doesn't trigger if snoozed early.
@@ -480,7 +465,6 @@ fn start_scheduler(hwnd: HWND) {
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() {
-    log_to_file("Application starting...");
     // ── Single-instance guard via named kernel mutex ───────────────────────
     let _mutex_guard;
     let name = wstr("Local\\GrayscaleTimerSingleInstance");
@@ -539,8 +523,7 @@ fn main() {
         ..unsafe { mem::zeroed() }
     };
     unsafe {
-        let res = RegisterClassExW(&wc);
-        log_to_file(&format!("RegisterClassExW result: {}", res));
+        let _ = RegisterClassExW(&wc);
     }
 
     // ── Create hidden top-level window ──────────────────────────────
